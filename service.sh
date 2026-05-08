@@ -266,21 +266,32 @@ run_sender() {
 
     local run_id
     local interval
+    local dest
+    local ack_args=()
 
+    dest="$(ask_required "Destination node ID, for example !28979058")"
     run_id="$(ask "Run ID" "test01")"
     interval="$(ask "Send interval in seconds" "60")"
+
+    if ask_yes_no "Request ACK from receiver? y/n" "y"; then
+        ack_args=(--ack)
+    fi
 
     echo
     echo "Starting sender..."
     echo "Script: $SENDER_SCRIPT"
+    echo "Destination: $dest"
+    echo "ACK: $([[ ${#ack_args[@]} -gt 0 ]] && echo "enabled" || echo "disabled")"
     echo "Run ID: $run_id"
     echo "Interval: $interval sec"
     echo
 
     "$PYTHON_BIN" "$SENDER_SCRIPT" \
         "${CONNECTION_ARGS[@]}" \
+        --dest "$dest" \
         --run-id "$run_id" \
-        --interval "$interval"
+        --interval "$interval" \
+        "${ack_args[@]}"
 }
 
 run_receiver() {
@@ -322,26 +333,30 @@ run_menu() {
     ensure_project_structure
     ensure_venv_exists
 
-    print_header
+    while true; do
+        print_header
 
-    local role
-    role="$(choose_role)"
+        local role
+        role="$(choose_role)"
 
-    case "$role" in
-        sender)
-            run_sender
-            ;;
-        receiver)
-            run_receiver
-            ;;
-        back)
-            return
-            ;;
-        *)
-            echo "Unknown option."
-            pause
-            ;;
-    esac
+        case "$role" in
+            sender)
+                run_sender
+                break
+                ;;
+            receiver)
+                run_receiver
+                break
+                ;;
+            back)
+                return
+                ;;
+            invalid)
+                echo "Unknown option."
+                pause
+                ;;
+        esac
+    done
 }
 
 main_menu() {
