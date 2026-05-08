@@ -145,6 +145,8 @@ def on_receive(packet, interface):
 
     text = decoded.get("text")
 
+    print(text)
+
     if text is None:
         payload = decoded.get("payload")
 
