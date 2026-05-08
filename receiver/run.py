@@ -1,3 +1,4 @@
+import os
 import csv
 import json
 import math
@@ -5,21 +6,35 @@ import time
 import argparse
 import subprocess
 from pathlib import Path
+from pprint import pprint
 
 from pubsub import pub
 
-import meshtastic.serial_interface
-import meshtastic.tcp_interface
+
+def is_termux():
+    return (
+        "TERMUX_VERSION" in os.environ
+        or os.environ.get("PREFIX", "").startswith("/data/data/com.termux")
+    )
 
 
 def connect(args):
     if args.host:
-        return meshtastic.tcp_interface.TCPInterface(hostname=args.host, noProto=False)
+        from meshtastic.tcp_interface import TCPInterface
+        return TCPInterface(hostname=args.host, noProto=False)
+
+    if is_termux():
+        raise RuntimeError(
+            "USB serial is not supported in Termux. "
+            "Use Wi-Fi connection with --host <MESHTASTIC_NODE_IP>."
+        )
 
     if args.port:
-        return meshtastic.serial_interface.SerialInterface(devPath=args.port)
+        from meshtastic.serial_interface import SerialInterface
+        return SerialInterface(devPath=args.port)
 
-    return meshtastic.serial_interface.SerialInterface()
+    from meshtastic.serial_interface import SerialInterface
+    return SerialInterface()
 
 
 def get_field(packet, *names):
@@ -27,6 +42,42 @@ def get_field(packet, *names):
         if name in packet:
             return packet[name]
     return None
+
+
+def get_decoded_field(decoded, *names):
+    for name in names:
+        if name in decoded:
+            return decoded[name]
+    return None
+
+
+def extract_text(packet):
+    decoded = packet.get("decoded") or {}
+
+    text = decoded.get("text")
+
+    if text:
+        return text
+
+    payload = decoded.get("payload")
+
+    if isinstance(payload, bytes):
+        return payload.decode("utf-8", errors="replace")
+
+    if isinstance(payload, bytearray):
+        return bytes(payload).decode("utf-8", errors="replace")
+
+    if isinstance(payload, str):
+        return payload
+
+    return None
+
+
+def is_text_packet(packet):
+    decoded = packet.get("decoded") or {}
+    portnum = decoded.get("portnum")
+
+    return portnum == "TEXT_MESSAGE_APP"
 
 
 def parse_test_text(text):
@@ -99,6 +150,7 @@ parser.add_argument("--sender-lat", type=float, required=True)
 parser.add_argument("--sender-lon", type=float, required=True)
 
 parser.add_argument("--use-termux-gps", action="store_true")
+parser.add_argument("--debug-packets", action="store_true")
 
 args = parser.parse_args()
 
@@ -109,6 +161,7 @@ fields = [
     "run_id",
     "seq",
     "from",
+    "from_id",
     "to",
     "packet_id",
 
@@ -131,6 +184,8 @@ fields = [
     "hop_limit",
     "hops_taken",
 
+    "channel",
+    "portnum",
     "text",
 ]
 
@@ -141,25 +196,31 @@ if not out_path.exists():
 
 
 def on_receive(packet, interface):
-    decoded = packet.get("decoded", {})
+    decoded = packet.get("decoded") or {}
 
-    text = decoded.get("text")
+    if args.debug_packets:
+        print("\n--- RAW PACKET ---")
+        pprint(packet)
 
-    if text is None:
-        payload = decoded.get("payload")
+    portnum = decoded.get("portnum")
 
-        if isinstance(payload, bytes):
-            text = payload.decode("utf-8", errors="replace")
+    if portnum != "TEXT_MESSAGE_APP":
+        if args.debug_packets:
+            print(f"Skipped non-text packet. portnum={portnum}")
+        return
 
-    print(f"Text {text}")
+    text = extract_text(packet)
+
+    print(f"Received text: {text}")
 
     parsed = parse_test_text(text)
 
     if parsed is None:
+        if args.debug_packets:
+            print("Skipped text packet because it is not RT format.")
         return
 
     now_ms = int(time.time() * 1000)
-
     tx_time_ms = int(parsed["tx_ms"])
 
     gps = (
@@ -197,6 +258,7 @@ def on_receive(packet, interface):
         "seq": parsed["seq"],
 
         "from": get_field(packet, "from"),
+        "from_id": get_field(packet, "fromId", "from_id"),
         "to": get_field(packet, "to"),
         "packet_id": get_field(packet, "id"),
 
@@ -220,6 +282,8 @@ def on_receive(packet, interface):
         "hop_limit": hop_limit,
         "hops_taken": hops_taken,
 
+        "channel": get_field(packet, "channel"),
+        "portnum": portnum,
         "text": text,
     }
 
@@ -227,12 +291,16 @@ def on_receive(packet, interface):
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writerow(row)
 
+    print("Saved row:")
     print(row)
 
 
 pub.subscribe(on_receive, "meshtastic.receive")
 
 interface = connect(args)
+
+print("Receiver started.")
+print("Waiting for RT text packets...")
 
 try:
     while True:
