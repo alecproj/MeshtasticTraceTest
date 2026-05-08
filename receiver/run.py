@@ -145,13 +145,13 @@ def on_receive(packet, interface):
 
     text = decoded.get("text")
 
-    print(text)
-
     if text is None:
         payload = decoded.get("payload")
 
         if isinstance(payload, bytes):
             text = payload.decode("utf-8", errors="replace")
+
+    print(f"Text {text}")
 
     parsed = parse_test_text(text)
 
