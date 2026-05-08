@@ -35,6 +35,10 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+is_termux() {
+    [[ -n "${TERMUX_VERSION:-}" ]] || [[ "${PREFIX:-}" == /data/data/com.termux* ]]
+}
+
 run_as_root() {
     if [[ "$(id -u)" -eq 0 ]]; then
         "$@"
@@ -101,6 +105,93 @@ ensure_project_structure() {
     [[ -f "$RECEIVER_SCRIPT" ]] || die "Receiver script not found: $RECEIVER_SCRIPT"
 }
 
+patch_pyserial_for_termux() {
+    if ! is_termux; then
+        return
+    fi
+
+    echo
+    echo "Termux detected. Applying pyserial Android patch..."
+
+    "$PYTHON_BIN" - <<'PY'
+from pathlib import Path
+import serial
+
+p = Path(serial.__file__).parent / "tools" / "list_ports_posix.py"
+s = p.read_text()
+
+print("Patching:", p)
+
+if "sys.platform.startswith('android')" in s or 'sys.platform.startswith("android")' in s:
+    print("Already patched.")
+    raise SystemExit(0)
+
+needle = 'raise ImportError("Sorry: no implementation for your platform'
+raise_pos = s.find(needle)
+
+if raise_pos == -1:
+    needle = "raise ImportError('Sorry: no implementation for your platform"
+    raise_pos = s.find(needle)
+
+if raise_pos == -1:
+    print("Could not find ImportError line.")
+    print("Open file manually:")
+    print(p)
+    raise SystemExit(1)
+
+before_raise = s[:raise_pos]
+lines = before_raise.splitlines(keepends=True)
+
+else_index = None
+
+for i in range(len(lines) - 1, -1, -1):
+    stripped = lines[i].strip()
+    if stripped == "else:":
+        else_index = i
+        break
+
+if else_index is None:
+    print("Could not find matching else before ImportError.")
+    print("Open file manually:")
+    print(p)
+    raise SystemExit(1)
+
+else_line = lines[else_index]
+indent = else_line[:len(else_line) - len(else_line.lstrip())]
+
+android_branch = (
+    f"{indent}elif sys.platform.startswith('android'):\n"
+    f"{indent}    from serial.tools.list_ports_linux import comports\n"
+    f"{indent}else:\n"
+)
+
+lines[else_index] = android_branch
+
+patched = "".join(lines) + s[raise_pos:]
+
+backup = p.with_suffix(".py.bak")
+backup.write_text(s)
+p.write_text(patched)
+
+print("Patch applied.")
+print("Backup saved to:", backup)
+PY
+}
+
+verify_termux_tcp_import() {
+    if ! is_termux; then
+        return
+    fi
+
+    echo
+    echo "Checking Meshtastic TCPInterface import..."
+
+    "$PYTHON_BIN" - <<'PY'
+from meshtastic.tcp_interface import TCPInterface
+print("TCPInterface import OK")
+PY
+}
+
 create_venv_and_install_python_deps() {
     local python_cmd="$1"
 
@@ -116,6 +207,9 @@ create_venv_and_install_python_deps() {
     echo
     echo "Installing Python dependencies..."
     "$PIP_BIN" install "meshtastic[cli]" pypubsub
+
+    patch_pyserial_for_termux
+    verify_termux_tcp_import
 
     echo
     echo "Installation completed."
@@ -228,6 +322,19 @@ choose_role() {
 
 choose_connection_args() {
     echo
+
+    if is_termux; then
+        echo "Termux detected."
+        echo "USB serial is not supported here."
+        echo "Use Wi-Fi / TCP connection to Meshtastic node."
+        echo
+
+        local host
+        host="$(ask_required "Enter Meshtastic node IP or hostname")"
+        CONNECTION_ARGS=(--host "$host")
+        return
+    fi
+
     echo "Choose Meshtastic connection:"
     echo "1) Wi-Fi / TCP host"
     echo "2) USB serial port"
@@ -267,9 +374,11 @@ run_sender() {
     local run_id
     local interval
     local dest
+    local channel
     local ack_args=()
 
     dest="$(ask_required "Destination node ID, for example !28979058")"
+    channel="$(ask "Channel index" "0")"
     run_id="$(ask "Run ID" "test01")"
     interval="$(ask "Send interval in seconds" "60")"
 
@@ -281,6 +390,7 @@ run_sender() {
     echo "Starting sender..."
     echo "Script: $SENDER_SCRIPT"
     echo "Destination: $dest"
+    echo "Channel index: $channel"
     echo "ACK: $([[ ${#ack_args[@]} -gt 0 ]] && echo "enabled" || echo "disabled")"
     echo "Run ID: $run_id"
     echo "Interval: $interval sec"
@@ -289,6 +399,7 @@ run_sender() {
     "$PYTHON_BIN" "$SENDER_SCRIPT" \
         "${CONNECTION_ARGS[@]}" \
         --dest "$dest" \
+        --channel "$channel" \
         --run-id "$run_id" \
         --interval "$interval" \
         "${ack_args[@]}"

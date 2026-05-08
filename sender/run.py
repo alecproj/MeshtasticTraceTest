@@ -20,6 +20,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--port", help="Например /dev/ttyUSB0")
 parser.add_argument("--host", help="IP Meshtastic-устройства по Wi-Fi")
 parser.add_argument("--dest", required=True, help="Node ID получателя, например !28979058")
+parser.add_argument("--channel", type=int, default=0)
 parser.add_argument("--ack", action="store_true")
 parser.add_argument("--interval", type=float, default=60.0)
 parser.add_argument("--run-id", default="test01")
@@ -44,6 +45,7 @@ try:
         interface.sendText(
             text,
             destinationId=args.dest,
+            channelIndex=args.channel,
             wantAck=args.ack
         )
 
